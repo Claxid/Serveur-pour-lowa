@@ -2,7 +2,7 @@ services:
   - type: web
     name: lowa-api
     runtime: go
-    buildCommand: go build -o main
+    buildCommand: go build -o main main.go
     startCommand: ./main
     envVars:
       - key: DATABASE_URL
