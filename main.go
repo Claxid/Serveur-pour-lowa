@@ -54,7 +54,15 @@ var db *sql.DB
 
 func initDB() error {
 	var err error
-	db, err = sql.Open("sqlite", "./lowa.db")
+
+	// Use DATABASE_URL from environment (Render/Heroku style) or fallback to SQLite-style local
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		// Local development fallback - you'll need PostgreSQL installed locally
+		dbURL = "postgres://localhost/lowa?sslmode=disable"
+	}
+
+	db, err = sql.Open("postgres", dbURL)
 	if err != nil {
 		return err
 	}
@@ -67,13 +75,13 @@ func initDB() error {
 	// Create users table
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
 			email TEXT UNIQUE NOT NULL,
 			password_hash TEXT NOT NULL,
 			nom TEXT NOT NULL,
 			prenom TEXT NOT NULL,
 			sexe TEXT,
-			date_creation DATETIME DEFAULT CURRENT_TIMESTAMP
+			date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
 	if err != nil {
@@ -85,7 +93,7 @@ func initDB() error {
 		CREATE TABLE IF NOT EXISTS carts (
 			user_id INTEGER PRIMARY KEY,
 			items TEXT,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		)
 	`)
@@ -96,9 +104,10 @@ func initDB() error {
 	// Create purchase_history table
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS purchase_history (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
+			id SERIAL PRIMARY KEY,
 			user_id INTEGER NOT NULL,
-			purchase_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+			purchase_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			total REAL NOT NULL,
 			items TEXT,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -113,8 +122,8 @@ func initDB() error {
 		CREATE TABLE IF NOT EXISTS sessions (
 			token TEXT PRIMARY KEY,
 			user_id INTEGER NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			expires_at DATETIME NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			expires_at TIMESTAMP NOT NULL,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		)
 	`)
@@ -122,7 +131,7 @@ func initDB() error {
 		return err
 	}
 
-	log.Println("✓ Database initialized successfully (lowa.db)")
+	log.Println("✓ Database initialized successfully (PostgreSQL)")
 	return nil
 }
 
@@ -139,13 +148,13 @@ func getSessionUserID(r *http.Request) (int, error) {
 
 	var userID int
 	var expiresAt time.Time
-	err := db.QueryRow("SELECT user_id, expires_at FROM sessions WHERE token = ?", token).Scan(&userID, &expiresAt)
+	err := db.QueryRow("SELECT user_id, expires_at FROM sessions WHERE token = $1", token).Scan(&userID, &expiresAt)
 	if err != nil {
 		return 0, fmt.Errorf("invalid session")
 	}
 
 	if expiresAt.Before(time.Now()) {
-		db.Exec("DELETE FROM sessions WHERE token = ?", token)
+		db.Exec("DELETE FROM sessions WHERE token = $1", token)
 		return 0, fmt.Errorf("session expired")
 	}
 
@@ -154,12 +163,12 @@ func getSessionUserID(r *http.Request) (int, error) {
 
 func createSession(userID int) string {
 	// Clean expired sessions
-	db.Exec("DELETE FROM sessions WHERE expires_at < datetime('now')")
+	db.Exec("DELETE FROM sessions WHERE expires_at < NOW()")
 
 	token := fmt.Sprintf("tok_%d_%d", userID, time.Now().UnixNano())
 	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days
 
-	db.Exec("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+	db.Exec("INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)",
 		token, userID, expiresAt)
 
 	return token
@@ -189,7 +198,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	passwordHash := hashPassword(req.Password)
 	result, err := db.Exec(
-		"INSERT INTO users (email, password_hash, nom, prenom, sexe) VALUES (?, ?, ?, ?, ?)",
+		"INSERT INTO users (email, password_hash, nom, prenom, sexe) VALUES ($1, $2, $3, $4, $5)",
 		req.Email, passwordHash, req.Nom, req.Prenom, req.Sexe,
 	)
 
@@ -202,7 +211,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	userID, _ := result.LastInsertId()
 
 	// Create empty cart for user
-	db.Exec("INSERT INTO carts (user_id, items) VALUES (?, ?)", userID, "[]")
+	db.Exec("INSERT INTO carts (user_id, items) VALUES ($1, $2)", userID, "[]")
 
 	token := createSession(int(userID))
 
@@ -236,7 +245,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	var storedHash string
 
 	err := db.QueryRow(
-		"SELECT id, email, nom, prenom, sexe, date_creation, password_hash FROM users WHERE email = ?",
+		"SELECT id, email, nom, prenom, sexe, date_creation, password_hash FROM users WHERE email = $1",
 		req.Email,
 	).Scan(&user.ID, &user.Email, &user.Nom, &user.Prenom, &user.Sexe, &user.DateCreation, &storedHash)
 
@@ -268,7 +277,7 @@ func handleGetUser(w http.ResponseWriter, r *http.Request) {
 
 	var user User
 	err = db.QueryRow(
-		"SELECT id, email, nom, prenom, sexe, date_creation FROM users WHERE id = ?",
+		"SELECT id, email, nom, prenom, sexe, date_creation FROM users WHERE id = $1",
 		userID,
 	).Scan(&user.ID, &user.Email, &user.Nom, &user.Prenom, &user.Sexe, &user.DateCreation)
 
@@ -300,7 +309,7 @@ func handleUpdateCart(w http.ResponseWriter, r *http.Request) {
 
 	itemsJSON, _ := json.Marshal(items)
 	_, err = db.Exec(
-		"INSERT OR REPLACE INTO carts (user_id, items, updated_at) VALUES (?, ?, datetime('now'))",
+		"INSERT INTO carts (user_id, items, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (user_id) DO UPDATE SET items = $2, updated_at = NOW()",
 		userID, string(itemsJSON),
 	)
 
@@ -324,7 +333,7 @@ func handleGetCart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var itemsJSON string
-	err = db.QueryRow("SELECT items FROM carts WHERE user_id = ?", userID).Scan(&itemsJSON)
+	err = db.QueryRow("SELECT items FROM carts WHERE user_id = $1", userID).Scan(&itemsJSON)
 
 	if err != nil {
 		// No cart yet, return empty array
@@ -350,7 +359,7 @@ func handleGetPurchaseHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(
-		"SELECT id, purchase_date, total, items FROM purchase_history WHERE user_id = ? ORDER BY purchase_date DESC",
+		"SELECT id, purchase_date, total, items FROM purchase_history WHERE user_id = $1 ORDER BY purchase_date DESC",
 		userID,
 	)
 
@@ -400,7 +409,7 @@ func handleCheckout(w http.ResponseWriter, r *http.Request) {
 
 	itemsJSON, _ := json.Marshal(checkoutData.Items)
 	_, err = db.Exec(
-		"INSERT INTO purchase_history (user_id, total, items) VALUES (?, ?, ?)",
+		"INSERT INTO purchase_history (user_id, total, items) VALUES ($1, $2, $3)",
 		userID, checkoutData.Total, string(itemsJSON),
 	)
 
@@ -411,7 +420,7 @@ func handleCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clear cart after checkout
-	db.Exec("UPDATE carts SET items = '[]', updated_at = datetime('now') WHERE user_id = ?", userID)
+	db.Exec("UPDATE carts SET items = '[]', updated_at = NOW() WHERE user_id = $1", userID)
 
 	log.Printf("Purchase completed for user ID: %d (Total: %.2f EUR)", userID, checkoutData.Total)
 
@@ -427,7 +436,7 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	token := r.Header.Get("Authorization")
 
 	if token != "" {
-		db.Exec("DELETE FROM sessions WHERE token = ?", token)
+		db.Exec("DELETE FROM sessions WHERE token = $1", token)
 	}
 
 	w.WriteHeader(http.StatusOK)
