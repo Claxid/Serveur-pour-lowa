@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 type User struct {
