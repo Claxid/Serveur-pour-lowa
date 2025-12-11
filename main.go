@@ -212,18 +212,18 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	passwordHash := hashPassword(req.Password)
-	result, err := db.Exec(
-		"INSERT INTO users (email, password_hash, nom, prenom, sexe) VALUES ($1, $2, $3, $4, $5)",
+
+	var userID int
+	err := db.QueryRow(
+		"INSERT INTO users (email, password_hash, nom, prenom, sexe) VALUES ($1, $2, $3, $4, $5) RETURNING id",
 		req.Email, passwordHash, req.Nom, req.Prenom, req.Sexe,
-	)
+	).Scan(&userID)
 
 	if err != nil {
 		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Email already exists"})
 		return
 	}
-
-	userID, _ := result.LastInsertId()
 
 	// Create empty cart for user
 	db.Exec("INSERT INTO carts (user_id, items) VALUES ($1, $2)", userID, "[]")
