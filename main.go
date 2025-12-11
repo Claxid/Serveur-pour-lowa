@@ -58,6 +58,7 @@ func initDB() error {
 	// Use DATABASE_URL from environment (Render/Heroku style) or fallback to SQLite-style local
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
+		log.Println("DATABASE_URL not set, using local postgres://localhost/lowa?sslmode=disable")
 		// Local development fallback - you'll need PostgreSQL installed locally
 		dbURL = "postgres://localhost/lowa?sslmode=disable"
 	}
@@ -67,8 +68,15 @@ func initDB() error {
 		return err
 	}
 
-	// Test connection
-	if err = db.Ping(); err != nil {
+	// Test connection with a few retries (helps when the DB is still starting on Render)
+	for i := 1; i <= 10; i++ {
+		if err = db.Ping(); err == nil {
+			break
+		}
+		log.Printf("DB ping failed (attempt %d/10): %v", i, err)
+		time.Sleep(3 * time.Second)
+	}
+	if err != nil {
 		return err
 	}
 
