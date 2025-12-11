@@ -173,6 +173,22 @@ func createSession(userID int) string {
 	return token
 }
 
+// CORS Middleware
+func enableCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
 // API Endpoints
 func handleRegister(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -462,11 +478,11 @@ func main() {
 	}
 	defer db.Close()
 
-	// API Routes
-	http.HandleFunc("/api/register", handleRegister)
-	http.HandleFunc("/api/login", handleLogin)
-	http.HandleFunc("/api/user", handleGetUser)
-	http.HandleFunc("/api/cart", func(w http.ResponseWriter, r *http.Request) {
+	// API Routes with CORS
+	http.HandleFunc("/api/register", enableCORS(handleRegister))
+	http.HandleFunc("/api/login", enableCORS(handleLogin))
+	http.HandleFunc("/api/user", enableCORS(handleGetUser))
+	http.HandleFunc("/api/cart", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			handleGetCart(w, r)
 		} else if r.Method == http.MethodPost {
@@ -474,10 +490,10 @@ func main() {
 		} else {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	})
-	http.HandleFunc("/api/purchase-history", handleGetPurchaseHistory)
-	http.HandleFunc("/api/checkout", handleCheckout)
-	http.HandleFunc("/api/logout", handleLogout)
+	}))
+	http.HandleFunc("/api/purchase-history", enableCORS(handleGetPurchaseHistory))
+	http.HandleFunc("/api/checkout", enableCORS(handleCheckout))
+	http.HandleFunc("/api/logout", enableCORS(handleLogout))
 
 	// Static files
 	fs := http.FileServer(http.Dir(*dir))
