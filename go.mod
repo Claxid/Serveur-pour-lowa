@@ -1,3 +1,3 @@
-module serveur-lowa
+module main
 
 go 1.21
