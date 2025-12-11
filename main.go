@@ -499,6 +499,30 @@ func handleUserPreferences(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"success": "true"})
 }
 
+// CORS Middleware
+func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Allow requests from your Vercel frontend
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+		// Handle preflight requests
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
 func main() {
 	dir := flag.String("dir", ".", "directory to serve")
 	addr := flag.String("addr", ":8080", "address to listen on")
@@ -519,11 +543,11 @@ func main() {
 	}
 	defer db.Close()
 
-	// API Routes
-	http.HandleFunc("/api/register", handleRegister)
-	http.HandleFunc("/api/login", handleLogin)
-	http.HandleFunc("/api/user", handleGetUser)
-	http.HandleFunc("/api/cart", func(w http.ResponseWriter, r *http.Request) {
+	// API Routes with CORS
+	http.HandleFunc("/api/register", corsMiddleware(handleRegister))
+	http.HandleFunc("/api/login", corsMiddleware(handleLogin))
+	http.HandleFunc("/api/user", corsMiddleware(handleGetUser))
+	http.HandleFunc("/api/cart", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			handleGetCart(w, r)
 		} else if r.Method == http.MethodPost {
@@ -531,11 +555,11 @@ func main() {
 		} else {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	})
-	http.HandleFunc("/api/purchase-history", handleGetPurchaseHistory)
-	http.HandleFunc("/api/checkout", handleCheckout)
-	http.HandleFunc("/api/logout", handleLogout)
-	http.HandleFunc("/api/user-preferences", handleUserPreferences)
+	}))
+	http.HandleFunc("/api/purchase-history", corsMiddleware(handleGetPurchaseHistory))
+	http.HandleFunc("/api/checkout", corsMiddleware(handleCheckout))
+	http.HandleFunc("/api/logout", corsMiddleware(handleLogout))
+	http.HandleFunc("/api/user-preferences", corsMiddleware(handleUserPreferences))
 
 	// Static files
 	fs := http.FileServer(http.Dir(*dir))
