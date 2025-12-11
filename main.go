@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	pq "github.com/lib/pq"
 )
 
 type User struct {
@@ -220,8 +220,15 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	).Scan(&userID)
 
 	if err != nil {
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Email already exists"})
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Email already exists"})
+			return
+		}
+
+		log.Printf("registration insert failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Registration failed"})
 		return
 	}
 
