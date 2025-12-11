@@ -105,7 +105,6 @@ func initDB() error {
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS purchase_history (
 			id SERIAL PRIMARY KEY,
-			id SERIAL PRIMARY KEY,
 			user_id INTEGER NOT NULL,
 			purchase_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			total REAL NOT NULL,
