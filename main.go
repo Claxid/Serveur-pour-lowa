@@ -12,8 +12,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	pq "github.com/lib/pq"
 )
 
 type User struct {
@@ -22,6 +20,7 @@ type User struct {
 	Nom          string    `json:"nom"`
 	Prenom       string    `json:"prenom"`
 	Sexe         string    `json:"sexe"`
+	Role         string    `json:"role"`
 	DateCreation time.Time `json:"date_creation"`
 }
 
@@ -54,54 +53,42 @@ var db *sql.DB
 
 func initDB() error {
 	var err error
-
-	// Use DATABASE_URL from environment (Render/Heroku style) or fallback to SQLite-style local
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		log.Println("DATABASE_URL not set, using local postgres://localhost/lowa?sslmode=disable")
-		// Local development fallback - you'll need PostgreSQL installed locally
-		dbURL = "postgres://localhost/lowa?sslmode=disable"
-	}
-
-	db, err = sql.Open("postgres", dbURL)
+	db, err = sql.Open("sqlite", "file:./lowa.db")
 	if err != nil {
 		return err
 	}
 
-	// Test connection with a few retries (helps when the DB is still starting on Render)
-	for i := 1; i <= 10; i++ {
-		if err = db.Ping(); err == nil {
-			break
-		}
-		log.Printf("DB ping failed (attempt %d/10): %v", i, err)
-		time.Sleep(3 * time.Second)
-	}
-	if err != nil {
+	// Test connection
+	if err = db.Ping(); err != nil {
 		return err
 	}
 
 	// Create users table
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
-			id SERIAL PRIMARY KEY,
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			email TEXT UNIQUE NOT NULL,
 			password_hash TEXT NOT NULL,
 			nom TEXT NOT NULL,
 			prenom TEXT NOT NULL,
 			sexe TEXT,
-			date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			role TEXT DEFAULT 'user',
+			date_creation DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
 	if err != nil {
 		return err
 	}
 
+	// Ensure 'role' column exists for older databases
+	db.Exec("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+
 	// Create carts table
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS carts (
 			user_id INTEGER PRIMARY KEY,
 			items TEXT,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		)
 	`)
@@ -112,9 +99,9 @@ func initDB() error {
 	// Create purchase_history table
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS purchase_history (
-			id SERIAL PRIMARY KEY,
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL,
-			purchase_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			purchase_date DATETIME DEFAULT CURRENT_TIMESTAMP,
 			total REAL NOT NULL,
 			items TEXT,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -129,8 +116,8 @@ func initDB() error {
 		CREATE TABLE IF NOT EXISTS sessions (
 			token TEXT PRIMARY KEY,
 			user_id INTEGER NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			expires_at TIMESTAMP NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			expires_at DATETIME NOT NULL,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		)
 	`)
@@ -138,7 +125,7 @@ func initDB() error {
 		return err
 	}
 
-	log.Println("✓ Database initialized successfully (PostgreSQL)")
+	log.Println("✓ Database initialized successfully (lowa.db)")
 	return nil
 }
 
@@ -155,13 +142,13 @@ func getSessionUserID(r *http.Request) (int, error) {
 
 	var userID int
 	var expiresAt time.Time
-	err := db.QueryRow("SELECT user_id, expires_at FROM sessions WHERE token = $1", token).Scan(&userID, &expiresAt)
+	err := db.QueryRow("SELECT user_id, expires_at FROM sessions WHERE token = ?", token).Scan(&userID, &expiresAt)
 	if err != nil {
 		return 0, fmt.Errorf("invalid session")
 	}
 
 	if expiresAt.Before(time.Now()) {
-		db.Exec("DELETE FROM sessions WHERE token = $1", token)
+		db.Exec("DELETE FROM sessions WHERE token = ?", token)
 		return 0, fmt.Errorf("session expired")
 	}
 
@@ -170,31 +157,15 @@ func getSessionUserID(r *http.Request) (int, error) {
 
 func createSession(userID int) string {
 	// Clean expired sessions
-	db.Exec("DELETE FROM sessions WHERE expires_at < NOW()")
+	db.Exec("DELETE FROM sessions WHERE expires_at < datetime('now')")
 
 	token := fmt.Sprintf("tok_%d_%d", userID, time.Now().UnixNano())
 	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days
 
-	db.Exec("INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)",
+	db.Exec("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
 		token, userID, expiresAt)
 
 	return token
-}
-
-// CORS Middleware
-func enableCORS(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next(w, r)
-	}
 }
 
 // API Endpoints
@@ -220,28 +191,21 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	passwordHash := hashPassword(req.Password)
-
-	var userID int
-	err := db.QueryRow(
-		"INSERT INTO users (email, password_hash, nom, prenom, sexe) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+	result, err := db.Exec(
+		"INSERT INTO users (email, password_hash, nom, prenom, sexe) VALUES (?, ?, ?, ?, ?)",
 		req.Email, passwordHash, req.Nom, req.Prenom, req.Sexe,
-	).Scan(&userID)
+	)
 
 	if err != nil {
-		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
-			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Email already exists"})
-			return
-		}
-
-		log.Printf("registration insert failed: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Registration failed"})
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Email already exists"})
 		return
 	}
 
+	userID, _ := result.LastInsertId()
+
 	// Create empty cart for user
-	db.Exec("INSERT INTO carts (user_id, items) VALUES ($1, $2)", userID, "[]")
+	db.Exec("INSERT INTO carts (user_id, items) VALUES (?, ?)", userID, "[]")
 
 	token := createSession(int(userID))
 
@@ -275,7 +239,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	var storedHash string
 
 	err := db.QueryRow(
-		"SELECT id, email, nom, prenom, sexe, date_creation, password_hash FROM users WHERE email = $1",
+		"SELECT id, email, nom, prenom, sexe, date_creation, password_hash FROM users WHERE email = ?",
 		req.Email,
 	).Scan(&user.ID, &user.Email, &user.Nom, &user.Prenom, &user.Sexe, &user.DateCreation, &storedHash)
 
@@ -307,9 +271,9 @@ func handleGetUser(w http.ResponseWriter, r *http.Request) {
 
 	var user User
 	err = db.QueryRow(
-		"SELECT id, email, nom, prenom, sexe, date_creation FROM users WHERE id = $1",
+		"SELECT id, email, nom, prenom, sexe, role, date_creation FROM users WHERE id = ?",
 		userID,
-	).Scan(&user.ID, &user.Email, &user.Nom, &user.Prenom, &user.Sexe, &user.DateCreation)
+	).Scan(&user.ID, &user.Email, &user.Nom, &user.Prenom, &user.Sexe, &user.Role, &user.DateCreation)
 
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -339,7 +303,7 @@ func handleUpdateCart(w http.ResponseWriter, r *http.Request) {
 
 	itemsJSON, _ := json.Marshal(items)
 	_, err = db.Exec(
-		"INSERT INTO carts (user_id, items, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (user_id) DO UPDATE SET items = $2, updated_at = NOW()",
+		"INSERT OR REPLACE INTO carts (user_id, items, updated_at) VALUES (?, ?, datetime('now'))",
 		userID, string(itemsJSON),
 	)
 
@@ -363,7 +327,7 @@ func handleGetCart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var itemsJSON string
-	err = db.QueryRow("SELECT items FROM carts WHERE user_id = $1", userID).Scan(&itemsJSON)
+	err = db.QueryRow("SELECT items FROM carts WHERE user_id = ?", userID).Scan(&itemsJSON)
 
 	if err != nil {
 		// No cart yet, return empty array
@@ -389,7 +353,7 @@ func handleGetPurchaseHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(
-		"SELECT id, purchase_date, total, items FROM purchase_history WHERE user_id = $1 ORDER BY purchase_date DESC",
+		"SELECT id, purchase_date, total, items FROM purchase_history WHERE user_id = ? ORDER BY purchase_date DESC",
 		userID,
 	)
 
@@ -439,7 +403,7 @@ func handleCheckout(w http.ResponseWriter, r *http.Request) {
 
 	itemsJSON, _ := json.Marshal(checkoutData.Items)
 	_, err = db.Exec(
-		"INSERT INTO purchase_history (user_id, total, items) VALUES ($1, $2, $3)",
+		"INSERT INTO purchase_history (user_id, total, items) VALUES (?, ?, ?)",
 		userID, checkoutData.Total, string(itemsJSON),
 	)
 
@@ -450,7 +414,7 @@ func handleCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clear cart after checkout
-	db.Exec("UPDATE carts SET items = '[]', updated_at = NOW() WHERE user_id = $1", userID)
+	db.Exec("UPDATE carts SET items = '[]', updated_at = datetime('now') WHERE user_id = ?", userID)
 
 	log.Printf("Purchase completed for user ID: %d (Total: %.2f EUR)", userID, checkoutData.Total)
 
@@ -466,7 +430,61 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	token := r.Header.Get("Authorization")
 
 	if token != "" {
-		db.Exec("DELETE FROM sessions WHERE token = $1", token)
+		db.Exec("DELETE FROM sessions WHERE token = ?", token)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"success": "true"})
+}
+
+// Save user preferences (e.g., cookie consent)
+func handleUserPreferences(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+		return
+	}
+
+	userID, err := getSessionUserID(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Not authenticated"})
+		return
+	}
+
+	var body struct {
+		CookieConsent string `json:"cookie_consent"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CookieConsent == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request"})
+		return
+	}
+
+	// Create table for preferences if not exists
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS user_preferences (
+		user_id INTEGER PRIMARY KEY,
+		cookie_consent TEXT,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+	)`)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to prepare table"})
+		return
+	}
+
+	// Upsert preference
+	_, err = db.Exec(`INSERT INTO user_preferences (user_id, cookie_consent, updated_at)
+		VALUES (?, ?, datetime('now'))
+		ON CONFLICT(user_id) DO UPDATE SET cookie_consent = excluded.cookie_consent, updated_at = excluded.updated_at`,
+		userID, body.CookieConsent,
+	)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save preferences"})
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -493,11 +511,11 @@ func main() {
 	}
 	defer db.Close()
 
-	// API Routes with CORS
-	http.HandleFunc("/api/register", enableCORS(handleRegister))
-	http.HandleFunc("/api/login", enableCORS(handleLogin))
-	http.HandleFunc("/api/user", enableCORS(handleGetUser))
-	http.HandleFunc("/api/cart", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+	// API Routes
+	http.HandleFunc("/api/register", handleRegister)
+	http.HandleFunc("/api/login", handleLogin)
+	http.HandleFunc("/api/user", handleGetUser)
+	http.HandleFunc("/api/cart", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			handleGetCart(w, r)
 		} else if r.Method == http.MethodPost {
@@ -505,10 +523,11 @@ func main() {
 		} else {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	}))
-	http.HandleFunc("/api/purchase-history", enableCORS(handleGetPurchaseHistory))
-	http.HandleFunc("/api/checkout", enableCORS(handleCheckout))
-	http.HandleFunc("/api/logout", enableCORS(handleLogout))
+	})
+	http.HandleFunc("/api/purchase-history", handleGetPurchaseHistory)
+	http.HandleFunc("/api/checkout", handleCheckout)
+	http.HandleFunc("/api/logout", handleLogout)
+	http.HandleFunc("/api/user-preferences", handleUserPreferences)
 
 	// Static files
 	fs := http.FileServer(http.Dir(*dir))
