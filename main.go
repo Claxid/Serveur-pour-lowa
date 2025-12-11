@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	pq "github.com/lib/pq"
 )
 
 type User struct {
@@ -58,6 +58,7 @@ func initDB() error {
 	// Use DATABASE_URL from environment, fallback to local postgres
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
+		log.Println("DATABASE_URL not set, using local postgres://localhost/lowa?sslmode=disable")
 		databaseURL = "postgres://localhost/lowa?sslmode=disable"
 	}
 
@@ -66,8 +67,15 @@ func initDB() error {
 		return err
 	}
 
-	// Test connection
-	if err = db.Ping(); err != nil {
+	// Test connection with retries (helps on cold start)
+	for i := 1; i <= 10; i++ {
+		if err = db.Ping(); err == nil {
+			break
+		}
+		log.Printf("DB ping failed (attempt %d/10): %v", i, err)
+		time.Sleep(3 * time.Second)
+	}
+	if err != nil {
 		return err
 	}
 
@@ -81,6 +89,7 @@ func initDB() error {
 			prenom TEXT NOT NULL,
 			sexe TEXT,
 			role TEXT DEFAULT 'user',
+			cookie_consent TEXT,
 			date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
@@ -88,8 +97,9 @@ func initDB() error {
 		return err
 	}
 
-	// Ensure 'role' column exists for older databases
+	// Ensure columns exist for older databases
 	db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'")
+	db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS cookie_consent TEXT")
 
 	// Create carts table
 	_, err = db.Exec(`
@@ -199,18 +209,24 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	passwordHash := hashPassword(req.Password)
-	result, err := db.Exec(
-		"INSERT INTO users (email, password_hash, nom, prenom, sexe) VALUES ($1, $2, $3, $4, $5)",
+	var userID int64
+	err := db.QueryRow(
+		"INSERT INTO users (email, password_hash, nom, prenom, sexe) VALUES ($1, $2, $3, $4, $5) RETURNING id",
 		req.Email, passwordHash, req.Nom, req.Prenom, req.Sexe,
-	)
+	).Scan(&userID)
 
 	if err != nil {
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Email already exists"})
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Email already exists"})
+			return
+		}
+
+		log.Printf("registration insert failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Registration failed"})
 		return
 	}
-
-	userID, _ := result.LastInsertId()
 
 	// Create empty cart for user
 	db.Exec("INSERT INTO carts (user_id, items) VALUES ($1, $2)", userID, "[]")
