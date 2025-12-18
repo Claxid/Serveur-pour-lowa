@@ -263,9 +263,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	var storedHash string
 
 	err := db.QueryRow(
-		"SELECT id, email, nom, prenom, sexe, date_creation, password_hash FROM users WHERE email = $1",
+		"SELECT id, email, nom, prenom, sexe, role, date_creation, password_hash FROM users WHERE email = $1",
 		req.Email,
-	).Scan(&user.ID, &user.Email, &user.Nom, &user.Prenom, &user.Sexe, &user.DateCreation, &storedHash)
+	).Scan(&user.ID, &user.Email, &user.Nom, &user.Prenom, &user.Sexe, &user.Role, &user.DateCreation, &storedHash)
 
 	if err != nil || storedHash != passwordHash {
 		w.WriteHeader(http.StatusUnauthorized)
