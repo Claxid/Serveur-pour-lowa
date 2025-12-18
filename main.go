@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +50,19 @@ type RegisterRequest struct {
 type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+type Product struct {
+	ID          int       `json:"id"`
+	Name        string    `json:"name"`
+	Price       float64   `json:"price"`
+	Description string    `json:"description"`
+	Image       string    `json:"image"`
+	Category    string    `json:"category"`
+	Subcategory string    `json:"subcategory"`
+	Collection  string    `json:"collection"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 var db *sql.DB
@@ -137,6 +151,25 @@ func initDB() error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			expires_at TIMESTAMP NOT NULL,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Create products table
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS products (
+			id SERIAL PRIMARY KEY,
+			name TEXT NOT NULL,
+			price REAL NOT NULL,
+			description TEXT,
+			image TEXT,
+			category TEXT,
+			subcategory TEXT,
+			collection TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
 	if err != nil {
@@ -539,6 +572,171 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// Helper: check admin role
+func isAdmin(r *http.Request) (int, bool) {
+	userID, err := getSessionUserID(r)
+	if err != nil {
+		return 0, false
+	}
+
+	var role string
+	if err := db.QueryRow("SELECT role FROM users WHERE id = $1", userID).Scan(&role); err != nil || role != "admin" {
+		return userID, false
+	}
+	return userID, true
+}
+
+// Get all products
+func handleGetProducts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	rows, err := db.Query(`
+		SELECT id, name, price, description, image, category, subcategory, collection, created_at, updated_at
+		FROM products
+		ORDER BY created_at DESC`)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch products"})
+		return
+	}
+	defer rows.Close()
+
+	products := []Product{}
+	for rows.Next() {
+		var p Product
+		if err := rows.Scan(&p.ID, &p.Name, &p.Price, &p.Description, &p.Image, &p.Category, &p.Subcategory, &p.Collection, &p.CreatedAt, &p.UpdatedAt); err == nil {
+			products = append(products, p)
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(products)
+}
+
+// Create product (admin only)
+func handleCreateProduct(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	_, admin := isAdmin(r)
+	if !admin {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Admin access required"})
+		return
+	}
+
+	var product Product
+	if err := json.NewDecoder(r.Body).Decode(&product); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request"})
+		return
+	}
+
+	err := db.QueryRow(`
+		INSERT INTO products (name, price, description, image, category, subcategory, collection)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, created_at, updated_at`,
+		product.Name, product.Price, product.Description, product.Image, product.Category, product.Subcategory, product.Collection,
+	).Scan(&product.ID, &product.CreatedAt, &product.UpdatedAt)
+	if err != nil {
+		log.Printf("Error creating product: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create product"})
+		return
+	}
+
+	log.Printf("Product created: %s (ID: %d)", product.Name, product.ID)
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(product)
+}
+
+// Update product (admin only)
+func handleUpdateProduct(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	_, admin := isAdmin(r)
+	if !admin {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Admin access required"})
+		return
+	}
+
+	var product Product
+	if err := json.NewDecoder(r.Body).Decode(&product); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request"})
+		return
+	}
+
+	if product.ID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Product ID required"})
+		return
+	}
+
+	err := db.QueryRow(`
+		UPDATE products
+		SET name = $1, price = $2, description = $3, image = $4, category = $5, subcategory = $6, collection = $7, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $8
+		RETURNING updated_at`,
+		product.Name, product.Price, product.Description, product.Image, product.Category, product.Subcategory, product.Collection, product.ID,
+	).Scan(&product.UpdatedAt)
+	if err != nil {
+		log.Printf("Error updating product: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update product"})
+		return
+	}
+
+	log.Printf("Product updated: %s (ID: %d)", product.Name, product.ID)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(product)
+}
+
+// Delete product (admin only)
+func handleDeleteProduct(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	_, admin := isAdmin(r)
+	if !admin {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Admin access required"})
+		return
+	}
+
+	productIDStr := r.URL.Query().Get("id")
+	if productIDStr == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Product ID required"})
+		return
+	}
+
+	productID, err := strconv.Atoi(productIDStr)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid product ID"})
+		return
+	}
+
+	result, err := db.Exec("DELETE FROM products WHERE id = $1", productID)
+	if err != nil {
+		log.Printf("Error deleting product: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete product"})
+		return
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Product not found"})
+		return
+	}
+
+	log.Printf("Product deleted: ID %d", productID)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"success": "Product deleted"})
+}
+
 func main() {
 	dir := flag.String("dir", ".", "directory to serve")
 	addr := flag.String("addr", ":8080", "address to listen on")
@@ -576,6 +774,22 @@ func main() {
 	http.HandleFunc("/api/checkout", corsMiddleware(handleCheckout))
 	http.HandleFunc("/api/logout", corsMiddleware(handleLogout))
 	http.HandleFunc("/api/user-preferences", corsMiddleware(handleUserPreferences))
+
+	// Products API routes
+	http.HandleFunc("/api/products", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleGetProducts(w, r)
+		case http.MethodPost:
+			handleCreateProduct(w, r)
+		case http.MethodPut:
+			handleUpdateProduct(w, r)
+		case http.MethodDelete:
+			handleDeleteProduct(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
 
 	// Static files
 	fs := http.FileServer(http.Dir(*dir))
